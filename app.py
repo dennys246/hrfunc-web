@@ -202,24 +202,58 @@ def forward_to_backend(url, filename, payload_bytes, api_key=None):
     )
 
 
-def _shadow_forward(filename, payload_bytes, primary_status, primary_hash):
-    # Fire-and-forget; any failure stays in logs and never reaches the user.
-    # Use HRSERV_API_KEY explicitly — the shadow backend (HRServ) doesn't
-    # share the legacy backend's API key, so falling back silently would 401.
+def _shadow_forward(filename, payload_bytes, request_hash, primary_status):
+    """Fire-and-forget forward to HRServ for shadow validation.
+
+    Logs status comparison with the primary. Never raises — any failure
+    stays in logs and never reaches the user. The shadow backend uses
+    HRSERV_API_KEY (not the primary's API_KEY).
+
+    `request_hash` is the sha256 prefix of the augmented request body — it's
+    identical between primary and shadow forwards by construction, so it
+    serves as a per-upload correlation id (NOT a comparison signal).
+    `primary_status` is the primary backend's HTTP status, or None if the
+    primary call raised. The shadow forward fires regardless.
+    """
     try:
         resp = forward_to_backend(
             SHADOW_URL, filename, payload_bytes, api_key=HRSERV_API_KEY,
         )
-        shadow_hash = hashlib.sha256(resp.content).hexdigest()[:12]
+        shadow_status = resp.status_code
+        status_match = primary_status == shadow_status
         app.logger.info(
-            "shadow_write filename=%s primary_status=%d primary_hash=%s "
-            "shadow_status=%d shadow_hash=%s match=%s",
-            filename, primary_status, primary_hash,
-            resp.status_code, shadow_hash,
-            primary_status == resp.status_code and primary_hash == shadow_hash,
+            "shadow_write filename=%s req_hash=%s primary_status=%s "
+            "shadow_status=%d status_match=%s",
+            filename, request_hash, primary_status, shadow_status, status_match,
         )
+        if not status_match:
+            app.logger.warning(
+                "shadow_divergence filename=%s req_hash=%s primary_status=%s "
+                "shadow_status=%d shadow_body=%.300s",
+                filename, request_hash, primary_status, shadow_status, resp.text,
+            )
     except Exception:
-        app.logger.exception("shadow_write failed filename=%s", filename)
+        app.logger.exception(
+            "shadow_write failed filename=%s req_hash=%s primary_status=%s",
+            filename, request_hash, primary_status,
+        )
+
+
+def _start_shadow_thread(filename, payload_bytes, primary_status):
+    """Start the shadow forward in a daemon thread, if SHADOW_URL is configured.
+
+    Centralizes the "should we fire shadow?" check so upload_json doesn't
+    repeat the SHADOW_URL guard in every code path (success, failure,
+    exception). Hashes the request body once for log correlation.
+    """
+    if not SHADOW_URL:
+        return
+    request_hash = hashlib.sha256(payload_bytes).hexdigest()[:12]
+    Thread(
+        target=_shadow_forward,
+        args=(filename, payload_bytes, request_hash, primary_status),
+        daemon=True,
+    ).start()
 
 
 @app.route("/")
@@ -340,21 +374,22 @@ def upload_json():
         return redirect(url_for("hrf_upload"))
 
     # ---- Forward to API ----
+    # Shadow fires on EVERY primary outcome (success, failure, or transport
+    # exception). The failure paths are the most interesting divergence
+    # signals — if HRServ accepts an upload the legacy backend rejected (or
+    # vice versa), that's a real bug to investigate before cutover.
     try:
         resp = forward_to_backend(UPLOAD_URL, filename, augmented_bytes)
+        primary_status = resp.status_code
     except Exception as e:
+        _start_shadow_thread(filename, augmented_bytes, primary_status=None)
         flash(f"Error contacting API: {e}", "error")
         return redirect(url_for("hrf_upload"))
 
+    _start_shadow_thread(filename, augmented_bytes, primary_status=primary_status)
+
     # ---- Handle response ----
     if resp.status_code == 200:
-        if SHADOW_URL:
-            primary_hash = hashlib.sha256(resp.content).hexdigest()[:12]
-            Thread(
-                target=_shadow_forward,
-                args=(filename, augmented_bytes, resp.status_code, primary_hash),
-                daemon=True,
-            ).start()
         try:
             send_confirmation_email(submission_metadata.get("email"), submission_metadata)
             flash(
