@@ -10,7 +10,7 @@ app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 5 * 1024 * 1024
 API_KEY = os.environ.get("HRFUNC_API_KEY")
 app.secret_key = os.environ.get("SECRET_KEY")
-UPLOAD_FOLDER = "/mnt/public/hrfunc/uploads"
+UPLOAD_URL = os.environ.get("HRFUNC_UPLOAD_URL", "https://flask.jib-jab.org/upload_json")
 TIMESTAMP_SUFFIX_FORMAT = "%Y-%m-%d_%H-%M-%S"
 RATE_LIMIT_SECONDS = 5
 _last_upload_attempt = {}
@@ -174,6 +174,17 @@ def send_confirmation_email(recipient, submission_metadata):
     except OSError:
         app.logger.exception("Unable to send confirmation email.")
 
+
+def forward_to_backend(url, filename, payload_bytes):
+    """POST the augmented HRF JSON to the configured upload backend."""
+    return requests.post(
+        url,
+        files={"jsonFile": (filename, payload_bytes)},
+        headers={"x-api-key": API_KEY},
+        timeout=10,
+    )
+
+
 @app.route("/")
 def home():
     return render_template("index.html")
@@ -283,7 +294,7 @@ def upload_json():
     augmented_bytes = json.dumps(data, separators=(",", ":")).encode("utf-8")
 
     if len(original_bytes) > app.config['MAX_CONTENT_LENGTH']:
-        flash("File too large. Max 2MB.", "error")
+        flash("File too large. Max 5MB.", "error")
         return redirect(url_for("hrf_upload"))
 
     # optional: validate structure
@@ -293,12 +304,7 @@ def upload_json():
 
     # ---- Forward to API ----
     try:
-        resp = requests.post(
-            "https://flask.jib-jab.org/upload_json",
-            files={"jsonFile": (filename, augmented_bytes)},
-            headers={"x-api-key": API_KEY},
-            timeout=10,
-        )
+        resp = forward_to_backend(UPLOAD_URL, filename, augmented_bytes)
     except Exception as e:
         flash(f"Error contacting API: {e}", "error")
         return redirect(url_for("hrf_upload"))
