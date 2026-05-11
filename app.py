@@ -9,6 +9,8 @@ from time import time
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 5 * 1024 * 1024
 API_KEY = os.environ.get("HRFUNC_API_KEY")
+ACCESS_CLIENT_ID = os.environ.get("HRFUNC_ACCESS_CLIENT_ID")
+ACCESS_CLIENT_SECRET = os.environ.get("HRFUNC_ACCESS_CLIENT_SECRET")
 app.secret_key = os.environ.get("SECRET_KEY")
 UPLOAD_URL = os.environ.get("HRFUNC_UPLOAD_URL", "https://flask.jib-jab.org/upload_json")
 TIMESTAMP_SUFFIX_FORMAT = "%Y-%m-%d_%H-%M-%S"
@@ -177,10 +179,14 @@ def send_confirmation_email(recipient, submission_metadata):
 
 def forward_to_backend(url, filename, payload_bytes):
     """POST the augmented HRF JSON to the configured upload backend."""
+    headers = {"x-api-key": API_KEY}
+    if ACCESS_CLIENT_ID and ACCESS_CLIENT_SECRET:
+        headers["CF-Access-Client-Id"] = ACCESS_CLIENT_ID
+        headers["CF-Access-Client-Secret"] = ACCESS_CLIENT_SECRET
     return requests.post(
         url,
         files={"jsonFile": (filename, payload_bytes)},
-        headers={"x-api-key": API_KEY},
+        headers=headers,
         timeout=10,
     )
 
