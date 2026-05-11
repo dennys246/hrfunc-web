@@ -240,13 +240,19 @@ def _shadow_forward(filename, payload_bytes, request_hash, primary_status):
 
 
 def _start_shadow_thread(filename, payload_bytes, primary_status):
-    """Start the shadow forward in a daemon thread, if SHADOW_URL is configured.
+    """Start the shadow forward in a daemon thread, if shadow is fully configured.
 
     Centralizes the "should we fire shadow?" check so upload_json doesn't
     repeat the SHADOW_URL guard in every code path (success, failure,
-    exception). Hashes the request body once for log correlation.
+    exception). Skips entirely when SHADOW_URL is unset OR HRSERV_API_KEY is
+    unset — firing with the wrong key (e.g., the primary key, which HRServ
+    doesn't know) would just produce 401s and pollute the shadow window's
+    divergence signal. A startup-time warning surfaces the misconfiguration
+    once per process so operators can fix it without log spam per request.
+
+    Hashes the request body once for log correlation.
     """
-    if not SHADOW_URL:
+    if not SHADOW_URL or not HRSERV_API_KEY:
         return
     request_hash = hashlib.sha256(payload_bytes).hexdigest()[:12]
     Thread(
@@ -254,6 +260,16 @@ def _start_shadow_thread(filename, payload_bytes, primary_status):
         args=(filename, payload_bytes, request_hash, primary_status),
         daemon=True,
     ).start()
+
+
+if SHADOW_URL and not HRSERV_API_KEY:
+    # Startup-time warning — surfaces the misconfig once, in Render logs,
+    # without per-request log spam. The operator sees this when redeploying
+    # and can either set HRFUNC_API_KEY_HRSERV or remove HRFUNC_SHADOW_URL.
+    app.logger.warning(
+        "HRFUNC_SHADOW_URL is set but HRFUNC_API_KEY_HRSERV is not — "
+        "shadow forwards will be skipped until both are present."
+    )
 
 
 @app.route("/")
