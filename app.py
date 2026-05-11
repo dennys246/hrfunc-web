@@ -9,6 +9,10 @@ from time import time
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 5 * 1024 * 1024
 API_KEY = os.environ.get("HRFUNC_API_KEY")
+# Separate key for the shadow backend (HRServ uses argon2-hashed keys via the
+# api_keys table — different plaintext than the legacy flask.jib-jab.org key).
+# Without this, shadow forwards send the wrong key and 401 every time.
+HRSERV_API_KEY = os.environ.get("HRFUNC_API_KEY_HRSERV")
 ACCESS_CLIENT_ID = os.environ.get("HRFUNC_ACCESS_CLIENT_ID")
 ACCESS_CLIENT_SECRET = os.environ.get("HRFUNC_ACCESS_CLIENT_SECRET")
 app.secret_key = os.environ.get("SECRET_KEY")
@@ -178,9 +182,15 @@ def send_confirmation_email(recipient, submission_metadata):
         app.logger.exception("Unable to send confirmation email.")
 
 
-def forward_to_backend(url, filename, payload_bytes):
-    """POST the augmented HRF JSON to the configured upload backend."""
-    headers = {"x-api-key": API_KEY}
+def forward_to_backend(url, filename, payload_bytes, api_key=None):
+    """POST the augmented HRF JSON to the configured upload backend.
+
+    `api_key` overrides the module-level `API_KEY` for this call. Use this to
+    send different `x-api-key` values to the primary (legacy) and shadow
+    (HRServ) backends — they use different argon2-hash registries and won't
+    share a single key.
+    """
+    headers = {"x-api-key": api_key or API_KEY}
     if ACCESS_CLIENT_ID and ACCESS_CLIENT_SECRET:
         headers["CF-Access-Client-Id"] = ACCESS_CLIENT_ID
         headers["CF-Access-Client-Secret"] = ACCESS_CLIENT_SECRET
@@ -194,8 +204,12 @@ def forward_to_backend(url, filename, payload_bytes):
 
 def _shadow_forward(filename, payload_bytes, primary_status, primary_hash):
     # Fire-and-forget; any failure stays in logs and never reaches the user.
+    # Use HRSERV_API_KEY explicitly — the shadow backend (HRServ) doesn't
+    # share the legacy backend's API key, so falling back silently would 401.
     try:
-        resp = forward_to_backend(SHADOW_URL, filename, payload_bytes)
+        resp = forward_to_backend(
+            SHADOW_URL, filename, payload_bytes, api_key=HRSERV_API_KEY,
+        )
         shadow_hash = hashlib.sha256(resp.content).hexdigest()[:12]
         app.logger.info(
             "shadow_write filename=%s primary_status=%d primary_hash=%s "
