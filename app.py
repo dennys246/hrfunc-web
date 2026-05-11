@@ -1,9 +1,9 @@
 from flask import Flask, request, redirect, url_for, flash, render_template, jsonify, session, Response, has_request_context
 from werkzeug.utils import secure_filename
-import os, json, requests, random, smtplib, secrets
+import os, json, requests, random, smtplib, secrets, hashlib
 from email.message import EmailMessage
 from datetime import datetime, timezone
-from threading import Lock
+from threading import Lock, Thread
 from time import time
 
 app = Flask(__name__)
@@ -13,6 +13,7 @@ ACCESS_CLIENT_ID = os.environ.get("HRFUNC_ACCESS_CLIENT_ID")
 ACCESS_CLIENT_SECRET = os.environ.get("HRFUNC_ACCESS_CLIENT_SECRET")
 app.secret_key = os.environ.get("SECRET_KEY")
 UPLOAD_URL = os.environ.get("HRFUNC_UPLOAD_URL", "https://flask.jib-jab.org/upload_json")
+SHADOW_URL = os.environ.get("HRFUNC_SHADOW_URL")
 TIMESTAMP_SUFFIX_FORMAT = "%Y-%m-%d_%H-%M-%S"
 RATE_LIMIT_SECONDS = 5
 _last_upload_attempt = {}
@@ -191,6 +192,22 @@ def forward_to_backend(url, filename, payload_bytes):
     )
 
 
+def _shadow_forward(filename, payload_bytes, primary_status, primary_hash):
+    # Fire-and-forget; any failure stays in logs and never reaches the user.
+    try:
+        resp = forward_to_backend(SHADOW_URL, filename, payload_bytes)
+        shadow_hash = hashlib.sha256(resp.content).hexdigest()[:12]
+        app.logger.info(
+            "shadow_write filename=%s primary_status=%d primary_hash=%s "
+            "shadow_status=%d shadow_hash=%s match=%s",
+            filename, primary_status, primary_hash,
+            resp.status_code, shadow_hash,
+            primary_status == resp.status_code and primary_hash == shadow_hash,
+        )
+    except Exception:
+        app.logger.exception("shadow_write failed filename=%s", filename)
+
+
 @app.route("/")
 def home():
     return render_template("index.html")
@@ -317,6 +334,13 @@ def upload_json():
 
     # ---- Handle response ----
     if resp.status_code == 200:
+        if SHADOW_URL:
+            primary_hash = hashlib.sha256(resp.content).hexdigest()[:12]
+            Thread(
+                target=_shadow_forward,
+                args=(filename, augmented_bytes, resp.status_code, primary_hash),
+                daemon=True,
+            ).start()
         try:
             send_confirmation_email(submission_metadata.get("email"), submission_metadata)
             flash(
