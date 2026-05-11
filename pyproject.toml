@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hrfunc-flask-app"
+version = "0.1.0"
+description = "Flask web app for the HRfunc HRF submission and collaboration platform."
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.9"
+dependencies = [
+    "Flask",
+    "requests==2.32.3",
+    "gunicorn",
+]
+
+[tool.setuptools]
+py-modules = ["app", "wsgi"]
