@@ -16,6 +16,9 @@ with a short timeout fallback.
 
 from __future__ import annotations
 
+import email.parser
+import io
+import json
 import time
 
 import pytest
@@ -162,6 +165,85 @@ def test_shadow_uses_hrserv_key_not_primary_key(monkeypatch, client, flask_app, 
     shadow_calls = [c for c in responses.calls if c.request.url.startswith(SHADOW_URL)]
     assert len(shadow_calls) == 1
     assert shadow_calls[0].request.headers["x-api-key"] == SHADOW_KEY
+
+
+def _extract_json_file_from_multipart(request_body_bytes: bytes, content_type: str) -> dict:
+    """Parse the `jsonFile` part out of a multipart/form-data request body.
+
+    Tests need to assert what JSON the frontend actually forwarded to either
+    backend (e.g., that the `_hrf_submission` envelope is present). The
+    `responses` library exposes the raw request body; we use stdlib's
+    `email` module to parse the multipart since it's already in the stdlib.
+    """
+    # Build a synthetic email-style envelope so email.parser can split parts.
+    header_blob = f"Content-Type: {content_type}\r\n\r\n".encode()
+    parser = email.parser.BytesParser()
+    msg = parser.parsebytes(header_blob + request_body_bytes)
+    for part in msg.walk():
+        # The jsonFile part has Content-Disposition: form-data; name="jsonFile"
+        disposition = part.get("Content-Disposition", "")
+        if 'name="jsonFile"' in disposition:
+            payload = part.get_payload(decode=True)
+            return json.loads(payload.decode("utf-8"))
+    raise AssertionError("no jsonFile part found in multipart body")
+
+
+@responses.activate
+def test_both_backends_receive_hrf_submission_envelope(
+    monkeypatch, client, flask_app, sample_upload
+):
+    """Phase 3 contract: both backends receive the SAME augmented body with
+    the `_hrf_submission` envelope containing submitter metadata, original_
+    filename, stored_filename, and uploaded_at. HRServ's hot-field extraction
+    depends on this envelope; the legacy backend stores it too. They MUST get
+    identical bytes."""
+    _patch_app_config(monkeypatch, flask_app, shadow_url=SHADOW_URL, hrserv_key=SHADOW_KEY)
+    responses.add(responses.POST, PRIMARY_URL, json={"ok": True}, status=200)
+    responses.add(responses.POST, SHADOW_URL, json={"ok": True, "id": 1}, status=200)
+
+    client.post("/upload_json", data=sample_upload(), content_type="multipart/form-data")
+    _wait_for_calls(2)
+
+    assert len(responses.calls) == 2
+    primary_body = _extract_json_file_from_multipart(
+        responses.calls[0].request.body, responses.calls[0].request.headers["Content-Type"]
+    )
+    shadow_body = _extract_json_file_from_multipart(
+        responses.calls[1].request.body, responses.calls[1].request.headers["Content-Type"]
+    )
+
+    # Both bytes must be identical — the augmented JSON is computed once and
+    # forwarded to both.
+    assert primary_body == shadow_body
+
+    envelope = primary_body["_hrf_submission"]
+    assert envelope["study"] == "test-study"
+    assert envelope["email"] == "test@example.com"
+    assert envelope["doi"] == "10.1000/test.0001"
+    assert envelope["original_filename"].endswith(".json")
+    assert envelope["stored_filename"].startswith("study_2026-05-11")
+    assert envelope["uploaded_at"].startswith("20")  # ISO date with 4-digit year
+
+
+@responses.activate
+def test_cf_access_headers_propagated_to_both_backends(
+    monkeypatch, client, flask_app, sample_upload
+):
+    """When CF-Access service-token env vars are set, the headers go to BOTH
+    backends. Cloudflare Access on the legacy backend simply ignores them;
+    on HRServ they're the edge auth that gates the path."""
+    _patch_app_config(monkeypatch, flask_app, shadow_url=SHADOW_URL, hrserv_key=SHADOW_KEY)
+    monkeypatch.setattr(flask_app, "ACCESS_CLIENT_ID", "fake-id-123")
+    monkeypatch.setattr(flask_app, "ACCESS_CLIENT_SECRET", "fake-secret-456")
+    responses.add(responses.POST, PRIMARY_URL, json={"ok": True}, status=200)
+    responses.add(responses.POST, SHADOW_URL, json={"ok": True, "id": 1}, status=200)
+
+    client.post("/upload_json", data=sample_upload(), content_type="multipart/form-data")
+    _wait_for_calls(2)
+
+    for call in responses.calls:
+        assert call.request.headers["CF-Access-Client-Id"] == "fake-id-123"
+        assert call.request.headers["CF-Access-Client-Secret"] == "fake-secret-456"
 
 
 @responses.activate

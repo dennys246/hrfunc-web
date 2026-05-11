@@ -213,20 +213,25 @@ def _shadow_forward(filename, payload_bytes, request_hash, primary_status):
     identical between primary and shadow forwards by construction, so it
     serves as a per-upload correlation id (NOT a comparison signal).
     `primary_status` is the primary backend's HTTP status, or None if the
-    primary call raised. The shadow forward fires regardless.
+    primary call raised before producing a response. The shadow forward
+    fires regardless; when primary_status is None we log status_match as
+    "n/a" rather than the misleading "False".
     """
     try:
         resp = forward_to_backend(
             SHADOW_URL, filename, payload_bytes, api_key=HRSERV_API_KEY,
         )
         shadow_status = resp.status_code
-        status_match = primary_status == shadow_status
+        if primary_status is None:
+            status_match = "n/a"  # primary didn't reach a status; no comparison
+        else:
+            status_match = str(primary_status == shadow_status).lower()
         app.logger.info(
             "shadow_write filename=%s req_hash=%s primary_status=%s "
             "shadow_status=%d status_match=%s",
             filename, request_hash, primary_status, shadow_status, status_match,
         )
-        if not status_match:
+        if status_match == "false":
             app.logger.warning(
                 "shadow_divergence filename=%s req_hash=%s primary_status=%s "
                 "shadow_status=%d shadow_body=%.300s",
@@ -245,12 +250,22 @@ def _start_shadow_thread(filename, payload_bytes, primary_status):
     Centralizes the "should we fire shadow?" check so upload_json doesn't
     repeat the SHADOW_URL guard in every code path (success, failure,
     exception). Skips entirely when SHADOW_URL is unset OR HRSERV_API_KEY is
-    unset — firing with the wrong key (e.g., the primary key, which HRServ
-    doesn't know) would just produce 401s and pollute the shadow window's
-    divergence signal. A startup-time warning surfaces the misconfiguration
-    once per process so operators can fix it without log spam per request.
+    unset — firing with the wrong key would just produce 401s and pollute the
+    shadow window's divergence signal. A startup-time warning surfaces the
+    misconfiguration once per process so operators can fix it without log
+    spam per request.
 
-    Hashes the request body once for log correlation.
+    Daemon threads here have two known shadow-mode-acceptable trade-offs
+    documented for future-us:
+    - **Worker shutdown drops in-flight shadow forwards.** Render/gunicorn
+      kills daemon threads on SIGTERM; the user already got their primary
+      response so this only biases the divergence dataset against the last
+      ~10s before each deploy. Acceptable.
+    - **Concurrency is unbounded.** Each upload spawns a thread holding the
+      payload bytes (≤5 MB) until the request completes or the 10s timeout
+      fires. At normal traffic this is fine; under a sustained burst a
+      bounded thread pool / semaphore would be safer. Revisit if shadow
+      logs ever show queueing-related OOM patterns. Tracked separately.
     """
     if not SHADOW_URL or not HRSERV_API_KEY:
         return
