@@ -1,6 +1,6 @@
 from flask import Flask, request, redirect, url_for, flash, render_template, jsonify, session, Response, has_request_context
 from werkzeug.utils import secure_filename
-import os, json, requests, random, smtplib, secrets, hashlib
+import os, json, requests, random, smtplib, secrets, hashlib, logging
 from email.message import EmailMessage
 from datetime import datetime, timezone
 from threading import Lock, Thread
@@ -8,6 +8,15 @@ from time import time
 
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 5 * 1024 * 1024
+
+# Flask's `app.logger` defaults to WARNING in production (under gunicorn), which
+# means our `shadow_write` INFO lines never reach Render's log stream — only the
+# `shadow_divergence` WARN lines do. During the shadow validation window we
+# specifically want to SEE the successes too, to confirm uploads are landing on
+# both backends rather than just learn about failures. Bump to INFO unconditionally
+# in non-debug mode so both log levels flow through.
+if not app.debug:
+    app.logger.setLevel(logging.INFO)
 API_KEY = os.environ.get("HRFUNC_API_KEY")
 # Separate key for the shadow backend (HRServ uses argon2-hashed keys via the
 # api_keys table — different plaintext than the legacy flask.jib-jab.org key).
