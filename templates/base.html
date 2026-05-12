@@ -30,6 +30,8 @@
   <title>HRfunc | {% block title %}Home{% endblock %}</title>
   {% set page_title = self.title() | trim %}
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="icon" type="image/png" href="{{ url_for('static', filename='img/web_tab_icon.png') }}">
+  <link rel="apple-touch-icon" href="{{ url_for('static', filename='img/web_tab_icon.png') }}">
   <link rel="canonical" href="{{ canonical_url|default(default_canonical) }}">
   <link rel="home" href="{{ site_home_url }}">
   <link rel="index" href="{{ site_home_url }}">
