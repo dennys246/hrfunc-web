@@ -11,9 +11,10 @@
 {% endwith %}
 <div class="max-w-6xl mx-auto mt-10 px-4 md:px-8 py-10">
   <form action="{{ url_for('upload_json') }}" method="POST" enctype="multipart/form-data" class="theme-surface-strong max-w-xl mx-auto p-8 rounded-2xl shadow-lg space-y-6">
-    <div class="alert alert-warning w-full text-sm md:text-base font-medium py-4 px-5">
-      ⚠️ The HRF upload process is temporarily down today for some unexpected maintenance.
-      Please check back later, and reach out to help@hrfunc.org if you have any questions.
+    <div class="alert alert-success w-full text-sm md:text-base font-medium py-4 px-5">
+      ✅ HRF submissions are now available! Please keep an eye out for a confirmation
+      email of receipt (check your spam folder, since our DNS is new). If you don't
+      receive one, reach out to help@hrfunc.org and we'll make sure your submission came through.
     </div>
     <h2 class="text-2xl font-semibold text-center text-indigo-700 dark:text-indigo-300">Collaborate with your HRF estimates</h2>
     <p class="text-gray-700 dark:text-gray-200 leading-relaxed">

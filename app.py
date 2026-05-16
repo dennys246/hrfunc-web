@@ -99,19 +99,35 @@ def sitemap_xml():
     return Response(xml, mimetype="application/xml")
 
 
+def _send_email(msg):
+    """Deliver a pre-built EmailMessage via the configured SMTP server."""
+    smtp_host = os.environ.get("SMTP_HOST")
+    smtp_port = int(os.environ.get("SMTP_PORT", "587"))
+    smtp_user = os.environ.get("SMTP_USER")
+    smtp_password = os.environ.get("SMTP_PASSWORD")
+
+    if not smtp_host:
+        app.logger.warning("Skipping email send, SMTP_HOST not configured.")
+        return
+
+    try:
+        with smtplib.SMTP(smtp_host, smtp_port, timeout=10) as server:
+            if smtp_user and smtp_password:
+                server.starttls()
+                server.login(smtp_user, smtp_password)
+            server.send_message(msg)
+    except OSError:
+        app.logger.exception("Unable to send email.")
+
+
 def send_confirmation_email(recipient, submission_metadata):
     """Send a confirmation email acknowledging receipt of the HRF submission."""
     if not recipient:
         return
 
-    smtp_host = os.environ.get("SMTP_HOST")
-    smtp_port = int(os.environ.get("SMTP_PORT", "587"))
-    smtp_user = os.environ.get("SMTP_USER")
-    smtp_password = os.environ.get("SMTP_PASSWORD")
     from_email = os.environ.get("SMTP_FROM_EMAIL")
-
-    if not smtp_host or not from_email:
-        app.logger.warning("Skipping confirmation email, SMTP configuration incomplete.")
+    if not from_email:
+        app.logger.warning("Skipping confirmation email, SMTP_FROM_EMAIL not configured.")
         return
 
     msg = EmailMessage()
@@ -180,15 +196,71 @@ def send_confirmation_email(recipient, submission_metadata):
         "The HRfunc Team"
     )
     msg.set_content(body)
+    _send_email(msg)
 
-    try:
-        with smtplib.SMTP(smtp_host, smtp_port, timeout=10) as server:
-            if smtp_user and smtp_password:
-                server.starttls()
-                server.login(smtp_user, smtp_password)
-            server.send_message(msg)
-    except OSError:
-        app.logger.exception("Unable to send confirmation email.")
+
+def send_submission_notification(submission_metadata, payload_bytes):
+    """Notify the HRfunc team of a new submission and attach the JSON as a fail-safe.
+
+    The attached payload is the augmented body (raw HRF data + `_hrf_submission`
+    envelope), so even if both upload backends ever drop the file we still have
+    a complete copy in the inbox.
+    """
+    recipient = os.environ.get("SUBMISSIONS_NOTIFY_EMAIL")
+    from_email = os.environ.get("SMTP_FROM_EMAIL")
+    if not recipient or not from_email:
+        return
+
+    stored_filename = submission_metadata.get("stored_filename") or "hrf_submission.json"
+    study = submission_metadata.get("study") or "unknown study"
+
+    msg = EmailMessage()
+    msg["Subject"] = f"New HRF submission: {study}"
+    msg["From"] = from_email
+    msg["To"] = recipient
+
+    body = (
+        "A new HRF submission was received.\n\n"
+        "Submitter:\n"
+        f"  Name: {submission_metadata.get('name', 'N/A')}\n"
+        f"  Email: {submission_metadata.get('email', 'N/A')}\n"
+        f"  Phone: {submission_metadata.get('phone', 'N/A')}\n\n"
+        "Study:\n"
+        f"  Study: {submission_metadata.get('study', 'N/A')}\n"
+        f"  Area Codes: {submission_metadata.get('area_codes', 'N/A')}\n"
+        f"  DOI: {submission_metadata.get('doi', 'N/A')}\n"
+        f"  Dataset Ownership: {submission_metadata.get('dataset_ownership', 'N/A')}\n"
+        f"  Dataset Permission: {submission_metadata.get('dataset_permission', 'N/A')}\n"
+        f"  Dataset Owner: {submission_metadata.get('dataset_owner', 'N/A')}\n"
+        f"  Dataset Owner Email: {submission_metadata.get('dataset_contact', 'N/A')}\n"
+        f"  Used Unaltered HRfunc: {submission_metadata.get('hrfunc_standard', 'N/A')}\n"
+        f"  HRfunc Modifications: {submission_metadata.get('hrfunc_modifications', 'N/A') or 'N/A'}\n"
+        f"  Dataset Subset: {submission_metadata.get('dataset_subset', 'N/A')}\n\n"
+        "Experimental context:\n"
+        f"  Task: {submission_metadata.get('task', 'N/A')}\n"
+        f"  Condition(s): {submission_metadata.get('conditions', 'N/A')}\n"
+        f"  Stimuli: {submission_metadata.get('stimuli', 'N/A')}\n"
+        f"  Stimuli Medium: {submission_metadata.get('medium', 'N/A')}\n"
+        f"  Stimuli Intensity: {submission_metadata.get('intensity', 'N/A')}\n"
+        f"  Protocol: {submission_metadata.get('protocol', 'N/A')}\n"
+        f"  Age: {submission_metadata.get('age', 'N/A')}\n"
+        f"  Demographics: {submission_metadata.get('demographics', 'N/A')}\n"
+        f"  Health Status: {submission_metadata.get('health-status', 'N/A')}\n"
+        f"  Additional Comment: {submission_metadata.get('comment', 'N/A') or 'N/A'}\n\n"
+        "Upload:\n"
+        f"  Original Filename: {submission_metadata.get('original_filename', 'N/A')}\n"
+        f"  Stored Filename: {stored_filename}\n"
+        f"  Uploaded at (UTC): {submission_metadata.get('uploaded_at', 'N/A')}\n\n"
+        "The full augmented HRF JSON (data + submission envelope) is attached.\n"
+    )
+    msg.set_content(body)
+    msg.add_attachment(
+        payload_bytes,
+        maintype="application",
+        subtype="json",
+        filename=stored_filename,
+    )
+    _send_email(msg)
 
 
 def forward_to_backend(url, filename, payload_bytes, api_key=None):
@@ -432,6 +504,7 @@ def upload_json():
     if resp.status_code == 200:
         try:
             send_confirmation_email(submission_metadata.get("email"), submission_metadata)
+            send_submission_notification(submission_metadata, augmented_bytes)
             flash(
                 f"HRFs '{filename}' from the {submission.get('study', 'unknown')} study "
                 f"uploaded successfully, thank you {submission.get('name', 'researcher')}! We will reach out to you as soon as we are able to confirm upload details and confirm HRFs integration into the HRtree.",
