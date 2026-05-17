@@ -11,11 +11,63 @@
 {% endwith %}
 <div class="max-w-6xl mx-auto mt-10 px-4 md:px-8 py-10">
   <form action="{{ url_for('upload_json') }}" method="POST" enctype="multipart/form-data" class="theme-surface-strong max-w-xl mx-auto p-8 rounded-2xl shadow-lg space-y-6">
-    <div class="alert alert-success w-full text-sm md:text-base font-medium py-4 px-5">
-      ✅ HRF submissions are now available! Please keep an eye out for a confirmation
-      email of receipt (check your spam folder, since our DNS is new). If you don't
-      receive one, reach out to help@hrfunc.org and we'll make sure your submission came through.
+    <div id="health-pill"
+         class="mx-auto w-fit flex items-center gap-2 px-4 py-2 rounded-full text-sm md:text-base font-medium bg-gray-100 text-gray-700 dark:bg-gray-800 dark:text-gray-200"
+         role="status" aria-live="polite">
+      <span id="health-pill-dot" class="inline-block w-2.5 h-2.5 rounded-full bg-gray-400" aria-hidden="true"></span>
+      <span id="health-pill-text">Checking submission status…</span>
     </div>
+    <script>
+      (function () {
+        const HEALTHZ_URL = "https://api.hrfunc.org/healthz";
+        const POLL_MS = 60000;
+        const pill = document.getElementById("health-pill");
+        const dot = document.getElementById("health-pill-dot");
+        const text = document.getElementById("health-pill-text");
+        if (!pill || !dot || !text) return;
+
+        const states = {
+          checking: {
+            pill: "bg-gray-100 text-gray-700 dark:bg-gray-800 dark:text-gray-200",
+            dot: "bg-gray-400",
+            label: "Checking submission status…",
+          },
+          ok: {
+            pill: "bg-green-100 text-green-800 dark:bg-green-900/40 dark:text-green-200",
+            dot: "bg-green-500",
+            label: "Accepting HRF Submissions",
+          },
+          down: {
+            pill: "bg-red-100 text-red-800 dark:bg-red-900/40 dark:text-red-200",
+            dot: "bg-red-500",
+            label: "Submission system down",
+          },
+        };
+
+        function apply(state) {
+          const next = states[state];
+          for (const key of Object.keys(states)) {
+            pill.classList.remove(...states[key].pill.split(" "));
+            dot.classList.remove(...states[key].dot.split(" "));
+          }
+          pill.classList.add(...next.pill.split(" "));
+          dot.classList.add(...next.dot.split(" "));
+          text.textContent = next.label;
+        }
+
+        async function check() {
+          try {
+            const resp = await fetch(HEALTHZ_URL, { method: "GET" });
+            apply(resp.ok ? "ok" : "down");
+          } catch (_e) {
+            apply("down");
+          }
+        }
+
+        check();
+        setInterval(check, POLL_MS);
+      })();
+    </script>
     <h2 class="text-2xl font-semibold text-center text-indigo-700 dark:text-indigo-300">Collaborate with your HRF estimates</h2>
     <p class="text-gray-700 dark:text-gray-200 leading-relaxed">
     Share the HRF's you estimate using <strong>HR<i><span style="font-family: 'Times New Roman', serif;">func</span></i></strong>
