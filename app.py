@@ -1,36 +1,36 @@
 from flask import Flask, request, redirect, url_for, flash, render_template, jsonify, session, Response, has_request_context
 from werkzeug.utils import secure_filename
-import os, json, requests, random, smtplib, secrets, hashlib, logging
+import os, json, requests, smtplib, secrets, logging
 from email.message import EmailMessage
 from datetime import datetime, timezone
-from threading import Lock, Thread
+from threading import Lock
 from time import time
 
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 5 * 1024 * 1024
 
-# Flask's `app.logger` defaults to WARNING in production (under gunicorn), which
-# means our `shadow_write` INFO lines never reach Render's log stream — only the
-# `shadow_divergence` WARN lines do. During the shadow validation window we
-# specifically want to SEE the successes too, to confirm uploads are landing on
-# both backends rather than just learn about failures. Bump to INFO unconditionally
-# in non-debug mode so both log levels flow through.
+# app.logger defaults to WARNING under gunicorn in production; bump to INFO so the
+# per-upload forward outcome (logged below) is visible in the production log stream.
 if not app.debug:
     app.logger.setLevel(logging.INFO)
+
 API_KEY = os.environ.get("HRFUNC_API_KEY")
-# Separate key for the shadow backend (HRServ uses argon2-hashed keys via the
-# api_keys table — different plaintext than the legacy flask.jib-jab.org key).
-# Without this, shadow forwards send the wrong key and 401 every time.
-HRSERV_API_KEY = os.environ.get("HRFUNC_API_KEY_HRSERV")
 ACCESS_CLIENT_ID = os.environ.get("HRFUNC_ACCESS_CLIENT_ID")
 ACCESS_CLIENT_SECRET = os.environ.get("HRFUNC_ACCESS_CLIENT_SECRET")
 app.secret_key = os.environ.get("SECRET_KEY")
-UPLOAD_URL = os.environ.get("HRFUNC_UPLOAD_URL", "https://flask.jib-jab.org/upload_json")
-SHADOW_URL = os.environ.get("HRFUNC_SHADOW_URL")
+UPLOAD_URL = os.environ.get("HRFUNC_UPLOAD_URL")
 TIMESTAMP_SUFFIX_FORMAT = "%Y-%m-%d_%H-%M-%S"
 RATE_LIMIT_SECONDS = 5
 _last_upload_attempt = {}
 _rate_limit_lock = Lock()
+
+if not UPLOAD_URL:
+    # Fail loud at startup: with no backend URL, every upload posts to None and
+    # dies in the forward try/except below with only a generic flash and no log.
+    # This surfaces the misconfig once at boot so an operator notices on deploy.
+    app.logger.warning(
+        "HRFUNC_UPLOAD_URL is not set — uploads will fail until it is configured."
+    )
 
 
 @app.context_processor
@@ -263,15 +263,9 @@ def send_submission_notification(submission_metadata, payload_bytes):
     _send_email(msg)
 
 
-def forward_to_backend(url, filename, payload_bytes, api_key=None):
-    """POST the augmented HRF JSON to the configured upload backend.
-
-    `api_key` overrides the module-level `API_KEY` for this call. Use this to
-    send different `x-api-key` values to the primary (legacy) and shadow
-    (HRServ) backends — they use different argon2-hash registries and won't
-    share a single key.
-    """
-    headers = {"x-api-key": api_key or API_KEY}
+def forward_to_backend(url, filename, payload_bytes):
+    """POST the augmented HRF JSON to the configured upload backend."""
+    headers = {"x-api-key": API_KEY}
     if ACCESS_CLIENT_ID and ACCESS_CLIENT_SECRET:
         headers["CF-Access-Client-Id"] = ACCESS_CLIENT_ID
         headers["CF-Access-Client-Secret"] = ACCESS_CLIENT_SECRET
@@ -280,91 +274,6 @@ def forward_to_backend(url, filename, payload_bytes, api_key=None):
         files={"jsonFile": (filename, payload_bytes)},
         headers=headers,
         timeout=10,
-    )
-
-
-def _shadow_forward(filename, payload_bytes, request_hash, primary_status):
-    """Fire-and-forget forward to HRServ for shadow validation.
-
-    Logs status comparison with the primary. Never raises — any failure
-    stays in logs and never reaches the user. The shadow backend uses
-    HRSERV_API_KEY (not the primary's API_KEY).
-
-    `request_hash` is the sha256 prefix of the augmented request body — it's
-    identical between primary and shadow forwards by construction, so it
-    serves as a per-upload correlation id (NOT a comparison signal).
-    `primary_status` is the primary backend's HTTP status, or None if the
-    primary call raised before producing a response. The shadow forward
-    fires regardless; when primary_status is None we log status_match as
-    "n/a" rather than the misleading "False".
-    """
-    try:
-        resp = forward_to_backend(
-            SHADOW_URL, filename, payload_bytes, api_key=HRSERV_API_KEY,
-        )
-        shadow_status = resp.status_code
-        if primary_status is None:
-            status_match = "n/a"  # primary didn't reach a status; no comparison
-        else:
-            status_match = str(primary_status == shadow_status).lower()
-        app.logger.info(
-            "shadow_write filename=%s req_hash=%s primary_status=%s "
-            "shadow_status=%d status_match=%s",
-            filename, request_hash, primary_status, shadow_status, status_match,
-        )
-        if status_match == "false":
-            app.logger.warning(
-                "shadow_divergence filename=%s req_hash=%s primary_status=%s "
-                "shadow_status=%d shadow_body=%.300s",
-                filename, request_hash, primary_status, shadow_status, resp.text,
-            )
-    except Exception:
-        app.logger.exception(
-            "shadow_write failed filename=%s req_hash=%s primary_status=%s",
-            filename, request_hash, primary_status,
-        )
-
-
-def _start_shadow_thread(filename, payload_bytes, primary_status):
-    """Start the shadow forward in a daemon thread, if shadow is fully configured.
-
-    Centralizes the "should we fire shadow?" check so upload_json doesn't
-    repeat the SHADOW_URL guard in every code path (success, failure,
-    exception). Skips entirely when SHADOW_URL is unset OR HRSERV_API_KEY is
-    unset — firing with the wrong key would just produce 401s and pollute the
-    shadow window's divergence signal. A startup-time warning surfaces the
-    misconfiguration once per process so operators can fix it without log
-    spam per request.
-
-    Daemon threads here have two known shadow-mode-acceptable trade-offs
-    documented for future-us:
-    - **Worker shutdown drops in-flight shadow forwards.** Render/gunicorn
-      kills daemon threads on SIGTERM; the user already got their primary
-      response so this only biases the divergence dataset against the last
-      ~10s before each deploy. Acceptable.
-    - **Concurrency is unbounded.** Each upload spawns a thread holding the
-      payload bytes (≤5 MB) until the request completes or the 10s timeout
-      fires. At normal traffic this is fine; under a sustained burst a
-      bounded thread pool / semaphore would be safer. Revisit if shadow
-      logs ever show queueing-related OOM patterns. Tracked separately.
-    """
-    if not SHADOW_URL or not HRSERV_API_KEY:
-        return
-    request_hash = hashlib.sha256(payload_bytes).hexdigest()[:12]
-    Thread(
-        target=_shadow_forward,
-        args=(filename, payload_bytes, request_hash, primary_status),
-        daemon=True,
-    ).start()
-
-
-if SHADOW_URL and not HRSERV_API_KEY:
-    # Startup-time warning — surfaces the misconfig once, in Render logs,
-    # without per-request log spam. The operator sees this when redeploying
-    # and can either set HRFUNC_API_KEY_HRSERV or remove HRFUNC_SHADOW_URL.
-    app.logger.warning(
-        "HRFUNC_SHADOW_URL is set but HRFUNC_API_KEY_HRSERV is not — "
-        "shadow forwards will be skipped until both are present."
     )
 
 
@@ -486,22 +395,18 @@ def upload_json():
         return redirect(url_for("hrf_upload"))
 
     # ---- Forward to API ----
-    # Shadow fires on EVERY primary outcome (success, failure, or transport
-    # exception). The failure paths are the most interesting divergence
-    # signals — if HRServ accepts an upload the legacy backend rejected (or
-    # vice versa), that's a real bug to investigate before cutover.
     try:
         resp = forward_to_backend(UPLOAD_URL, filename, augmented_bytes)
-        primary_status = resp.status_code
     except Exception as e:
-        _start_shadow_thread(filename, augmented_bytes, primary_status=None)
+        # Transport-level failure (DNS, refused, timeout, unset URL). Log it —
+        # otherwise the only trace is a flash the operator never sees.
+        app.logger.warning("upload forward failed filename=%s error=%s", filename, e)
         flash(f"Error contacting API: {e}", "error")
         return redirect(url_for("hrf_upload"))
 
-    _start_shadow_thread(filename, augmented_bytes, primary_status=primary_status)
-
     # ---- Handle response ----
     if resp.status_code == 200:
+        app.logger.info("upload forwarded OK filename=%s status=200", filename)
         try:
             send_confirmation_email(submission_metadata.get("email"), submission_metadata)
             send_submission_notification(submission_metadata, augmented_bytes)
@@ -513,6 +418,12 @@ def upload_json():
         except Exception as e:
             app.logger.warning(f"Email send failed for {filename}: {e}")
     else:
+        # Backend rejected the upload (e.g. 401/403 from the access gate, 5xx).
+        # The likeliest silent failure on a token-gated backend — log it.
+        app.logger.warning(
+            "backend rejected upload filename=%s status=%s body=%.200s",
+            filename, resp.status_code, resp.text,
+        )
         flash(f"Upload failed: {resp.text}", "error")
 
     return redirect(url_for("hrf_upload"))

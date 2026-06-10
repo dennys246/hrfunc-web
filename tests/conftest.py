@@ -1,11 +1,11 @@
 """Shared pytest fixtures for hrfunc-web tests.
 
 Tests load `app` (the Flask app) and use Flask's `app.test_client()` to drive
-requests. The module-level env-driven constants (`UPLOAD_URL`, `SHADOW_URL`,
-`API_KEY`, `HRSERV_API_KEY`) are patched per-test via `monkeypatch.setattr`
-so each test exercises specific config without polluting the others.
+requests. The module-level env-driven constants (`UPLOAD_URL`, `API_KEY`) are
+patched per-test via `monkeypatch.setattr` so each test exercises specific
+config without polluting the others.
 
-`responses` mocks `requests.post` so we can verify the dual-write happened
+`responses` mocks `requests.post` so we can verify the upload forward happened
 end-to-end without needing real network calls.
 """
 

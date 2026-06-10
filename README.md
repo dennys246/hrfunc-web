@@ -10,11 +10,9 @@ community.
 
 | Variable | Purpose |
 |---|---|
-| `HRFUNC_UPLOAD_URL` | Primary (authoritative) upload backend. Defaults to `https://flask.jib-jab.org/upload_json`. |
-| `HRFUNC_API_KEY` | `x-api-key` value sent to the primary backend. |
-| `HRFUNC_SHADOW_URL` | (Phase 3 dual-write) When set, every upload is also forwarded here for shadow validation. Failures never affect the user. |
-| `HRFUNC_API_KEY_HRSERV` | `x-api-key` value sent to the shadow backend (HRServ) — distinct from the primary key because HRServ has its own argon2-hashed `api_keys` table. |
-| `HRFUNC_ACCESS_CLIENT_ID` | (Phase 1.5) Cloudflare Access service token id. Sent to whichever backend is gated by Cloudflare Access. |
+| `HRFUNC_UPLOAD_URL` | Upload backend endpoint. Required — the app logs a startup warning and all uploads fail if unset. |
+| `HRFUNC_API_KEY` | `x-api-key` value sent to the upload backend. |
+| `HRFUNC_ACCESS_CLIENT_ID` | Service-token client id for a backend gated behind service-token auth. |
 | `HRFUNC_ACCESS_CLIENT_SECRET` | Paired with the above. |
 | `SECRET_KEY` | Flask session secret. |
 | `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_FROM_EMAIL` | Confirmation-email delivery. |
@@ -31,5 +29,5 @@ python app.py                         # run dev server on :8000
 
 The test suite lives under `tests/` and uses `responses` to mock outbound
 HTTP, so tests run without needing a live backend. Coverage focuses on the
-dual-write contract (Phase 3): API-key routing, shadow-on-all-statuses,
-and shadow-failure isolation from the user response.
+upload-forward contract: the `x-api-key` header, service-token (`CF-Access`)
+header propagation, and the `_hrf_submission` envelope sent to the backend.
