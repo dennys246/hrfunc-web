@@ -10,7 +10,7 @@ community.
 
 | Variable | Purpose |
 |---|---|
-| `HRFUNC_UPLOAD_URL` | Primary (authoritative) upload backend endpoint. Required. |
+| `HRFUNC_UPLOAD_URL` | Upload backend endpoint. Required — the app logs a startup warning and all uploads fail if unset. |
 | `HRFUNC_API_KEY` | `x-api-key` value sent to the upload backend. |
 | `HRFUNC_ACCESS_CLIENT_ID` | Service-token client id for a backend gated behind service-token auth. |
 | `HRFUNC_ACCESS_CLIENT_SECRET` | Paired with the above. |

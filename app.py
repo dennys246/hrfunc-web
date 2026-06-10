@@ -1,6 +1,6 @@
 from flask import Flask, request, redirect, url_for, flash, render_template, jsonify, session, Response, has_request_context
 from werkzeug.utils import secure_filename
-import os, json, requests, random, smtplib, secrets
+import os, json, requests, smtplib, secrets, logging
 from email.message import EmailMessage
 from datetime import datetime, timezone
 from threading import Lock
@@ -8,6 +8,11 @@ from time import time
 
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 5 * 1024 * 1024
+
+# app.logger defaults to WARNING under gunicorn in production; bump to INFO so the
+# per-upload forward outcome (logged below) is visible in the production log stream.
+if not app.debug:
+    app.logger.setLevel(logging.INFO)
 
 API_KEY = os.environ.get("HRFUNC_API_KEY")
 ACCESS_CLIENT_ID = os.environ.get("HRFUNC_ACCESS_CLIENT_ID")
@@ -18,6 +23,14 @@ TIMESTAMP_SUFFIX_FORMAT = "%Y-%m-%d_%H-%M-%S"
 RATE_LIMIT_SECONDS = 5
 _last_upload_attempt = {}
 _rate_limit_lock = Lock()
+
+if not UPLOAD_URL:
+    # Fail loud at startup: with no backend URL, every upload posts to None and
+    # dies in the forward try/except below with only a generic flash and no log.
+    # This surfaces the misconfig once at boot so an operator notices on deploy.
+    app.logger.warning(
+        "HRFUNC_UPLOAD_URL is not set — uploads will fail until it is configured."
+    )
 
 
 @app.context_processor
@@ -385,11 +398,15 @@ def upload_json():
     try:
         resp = forward_to_backend(UPLOAD_URL, filename, augmented_bytes)
     except Exception as e:
+        # Transport-level failure (DNS, refused, timeout, unset URL). Log it —
+        # otherwise the only trace is a flash the operator never sees.
+        app.logger.warning("upload forward failed filename=%s error=%s", filename, e)
         flash(f"Error contacting API: {e}", "error")
         return redirect(url_for("hrf_upload"))
 
     # ---- Handle response ----
     if resp.status_code == 200:
+        app.logger.info("upload forwarded OK filename=%s status=200", filename)
         try:
             send_confirmation_email(submission_metadata.get("email"), submission_metadata)
             send_submission_notification(submission_metadata, augmented_bytes)
@@ -401,6 +418,12 @@ def upload_json():
         except Exception as e:
             app.logger.warning(f"Email send failed for {filename}: {e}")
     else:
+        # Backend rejected the upload (e.g. 401/403 from the access gate, 5xx).
+        # The likeliest silent failure on a token-gated backend — log it.
+        app.logger.warning(
+            "backend rejected upload filename=%s status=%s body=%.200s",
+            filename, resp.status_code, resp.text,
+        )
         flash(f"Upload failed: {resp.text}", "error")
 
     return redirect(url_for("hrf_upload"))

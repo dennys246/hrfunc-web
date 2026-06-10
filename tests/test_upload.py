@@ -105,9 +105,20 @@ def test_backend_receives_hrf_submission_envelope(monkeypatch, client, flask_app
     assert envelope["uploaded_at"].startswith("20")  # ISO date with 4-digit year
 
 
+def _flashes(client):
+    """Read pending flash messages out of the session without rendering them.
+
+    The view redirects without following, so flashes stay in the session as
+    (category, message) tuples. Asserting on them pins that the 302 came from
+    the backend-failure path specifically, not an earlier guard that also
+    redirects (rate-limit, bad file, bad JSON)."""
+    with client.session_transaction() as sess:
+        return sess.get("_flashes", [])
+
+
 @responses.activate
 def test_backend_non_200_surfaces_to_user(monkeypatch, client, flask_app, sample_upload):
-    """A backend rejection (non-200) is shown to the user but doesn't raise —
+    """A backend rejection (non-200) is flashed to the user but doesn't raise —
     the request still ends in the normal redirect."""
     _patch_app_config(monkeypatch, flask_app)
     responses.add(responses.POST, UPLOAD_URL, body="Invalid API key", status=401)
@@ -116,12 +127,13 @@ def test_backend_non_200_surfaces_to_user(monkeypatch, client, flask_app, sample
 
     assert response.status_code == 302  # frontend still redirects (with an error flash)
     assert len(responses.calls) == 1
+    assert any(cat == "error" and "Upload failed" in msg for cat, msg in _flashes(client))
 
 
 @responses.activate
 def test_backend_transport_exception_handled(monkeypatch, client, flask_app, sample_upload):
     """If the backend call raises (e.g., connection refused), the error is
-    caught and the user sees the normal redirect rather than a 500."""
+    caught, flashed, and the user sees the normal redirect rather than a 500."""
     _patch_app_config(monkeypatch, flask_app)
     # No mock registered for UPLOAD_URL → responses raises ConnectionError when
     # the forward fires. The view catches it and flashes an error.
@@ -129,3 +141,17 @@ def test_backend_transport_exception_handled(monkeypatch, client, flask_app, sam
     response = client.post("/upload_json", data=sample_upload(), content_type="multipart/form-data")
 
     assert response.status_code == 302  # user sees normal redirect, no exception escapes
+    assert any(cat == "error" and "Error contacting API" in msg for cat, msg in _flashes(client))
+
+
+@responses.activate
+def test_unset_upload_url_fails_gracefully(monkeypatch, client, flask_app, sample_upload):
+    """HRFUNC_UPLOAD_URL is now required (no default). When unset, the forward
+    posts to None and raises, which the view catches and flashes — no 500."""
+    monkeypatch.setattr(flask_app, "UPLOAD_URL", None)
+    monkeypatch.setattr(flask_app, "API_KEY", API_KEY)
+
+    response = client.post("/upload_json", data=sample_upload(), content_type="multipart/form-data")
+
+    assert response.status_code == 302
+    assert any(cat == "error" and "Error contacting API" in msg for cat, msg in _flashes(client))
