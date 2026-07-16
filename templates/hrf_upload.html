@@ -18,9 +18,16 @@
       <span id="health-pill-dot" class="inline-block w-2.5 h-2.5 rounded-full bg-gray-400" aria-hidden="true"></span>
       <span id="health-pill-text">Checking submission status…</span>
     </div>
+    <div id="replica-pill"
+         class="mx-auto w-fit flex items-center gap-1.5 mt-1 text-xs text-gray-500 dark:text-gray-400"
+         role="status" aria-live="polite">
+      <span id="replica-pill-dot" class="inline-block w-2 h-2 rounded-full bg-gray-400" aria-hidden="true"></span>
+      <span id="replica-pill-text">Mirror node: checking…</span>
+    </div>
     <script>
       (function () {
-        const HEALTHZ_URL = "https://api.hrfunc.org/healthz";
+        const PRIMARY_URL = "https://api.hrfunc.org/healthz";
+        const REPLICA_URL = "https://hrserv-2.hrfunc.org/healthz";
         const POLL_MS = 60000;
         const pill = document.getElementById("health-pill");
         const dot = document.getElementById("health-pill-dot");
@@ -37,6 +44,11 @@
             pill: "bg-green-100 text-green-800 dark:bg-green-900/40 dark:text-green-200",
             dot: "bg-green-500",
             label: "Accepting HRF Submissions",
+          },
+          degraded: {
+            pill: "bg-yellow-100 text-yellow-800 dark:bg-yellow-900/40 dark:text-yellow-200",
+            dot: "bg-yellow-500",
+            label: "Submissions paused — maintenance",
           },
           down: {
             pill: "bg-red-100 text-red-800 dark:bg-red-900/40 dark:text-red-200",
@@ -58,15 +70,47 @@
 
         async function check() {
           try {
-            const resp = await fetch(HEALTHZ_URL, { method: "GET" });
-            apply(resp.ok ? "ok" : "down");
+            const resp = await fetch(PRIMARY_URL, { method: "GET" });
+            if (!resp.ok) return apply("down");
+            const body = await resp.json();
+            // A healthy node that isn't the write primary refuses uploads
+            // with 503 — show that honestly instead of a green pill.
+            apply(body.db && body.node_role === "primary" ? "ok" : "degraded");
           } catch (_e) {
             apply("down");
           }
         }
 
+        // Secondary indicator: the standby node. Ops-facing, deliberately quiet.
+        const rDot = document.getElementById("replica-pill-dot");
+        const rText = document.getElementById("replica-pill-text");
+        const rStates = {
+          ok: { dot: "bg-green-500", label: "Mirror node: online" },
+          down: { dot: "bg-red-500", label: "Mirror node: offline" },
+        };
+
+        function applyReplica(state) {
+          if (!rDot || !rText) return;
+          rDot.classList.remove("bg-gray-400", "bg-green-500", "bg-red-500");
+          rDot.classList.add(rStates[state].dot);
+          rText.textContent = rStates[state].label;
+        }
+
+        async function checkReplica() {
+          if (!rDot || !rText) return;
+          try {
+            const resp = await fetch(REPLICA_URL, { method: "GET" });
+            const body = resp.ok ? await resp.json() : null;
+            applyReplica(body && body.db ? "ok" : "down");
+          } catch (_e) {
+            applyReplica("down");
+          }
+        }
+
         check();
+        checkReplica();
         setInterval(check, POLL_MS);
+        setInterval(checkReplica, POLL_MS);
       })();
     </script>
     <p class="text-gray-700 dark:text-gray-200 leading-relaxed">
